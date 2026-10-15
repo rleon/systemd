@@ -369,6 +369,11 @@ units = [
           'conditions' : ['HAVE_LIBCRYPTSETUP', 'ENABLE_INITRD'],
           'symlinks' : ['initrd.target.wants/'],
         },
+        {
+          'file' : 'systemd-device-accept-d.service.in',
+          'symlinks' : ['sysinit.target.wants/'],
+          'install_tag' : 'udev',
+        },
         { 'file' : 'systemd-exit.service' },
         { 'file' : 'systemd-factory-reset@.service.in' },
         {

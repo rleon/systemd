@@ -1,0 +1,42 @@
+#  SPDX-License-Identifier: LGPL-2.1-or-later
+#
+#  This file is part of systemd.
+#
+#  systemd is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU Lesser General Public License as published by
+#  the Free Software Foundation; either version 2.1 of the License, or
+#  (at your option) any later version.
+
+[Unit]
+Description=Device Acceptance Service
+Documentation=man:systemd-device-accept-d.service(8) man:accept.d(5) man:device-accept.conf(5)
+DefaultDependencies=no
+Conflicts=shutdown.target
+
+Before=systemd-udevd.service systemd-udev-trigger.service systemd-modules-load.service
+Before=sysinit.target shutdown.target
+
+Before=initrd-switch-root.target initrd-switch-root.service
+Conflicts=initrd-switch-root.target initrd-switch-root.service
+
+ConditionPathIsReadWrite=/sys
+ConditionDirectoryNotEmpty=|/etc/systemd/accept.d
+ConditionDirectoryNotEmpty=|/run/systemd/accept.d
+ConditionDirectoryNotEmpty=|/usr/local/lib/systemd/accept.d
+ConditionDirectoryNotEmpty=|/usr/lib/systemd/accept.d
+
+[Service]
+Type=notify-reload
+ExecStart={{LIBEXECDIR}}/systemd-device-accept-d
+Restart=on-failure
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateMounts=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+SystemCallFilter=@system-service
+{{SERVICE_WATCHDOG}}
