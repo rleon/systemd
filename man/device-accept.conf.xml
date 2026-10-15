@@ -1,0 +1,137 @@
+<?xml version='1.0'?> <!--*-nxml-*-->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
+
+<refentry id="device-accept.conf"
+    xmlns:xi="http://www.w3.org/2001/XInclude">
+  <refentryinfo>
+    <title>device-accept.conf</title>
+    <productname>systemd</productname>
+  </refentryinfo>
+
+  <refmeta>
+    <refentrytitle>device-accept.conf</refentrytitle>
+    <manvolnum>5</manvolnum>
+  </refmeta>
+
+  <refnamediv>
+    <refname>device-accept.conf</refname>
+    <refname>device-accept.conf.d</refname>
+    <refpurpose>Global <command>systemd-device-accept-d</command> configuration files</refpurpose>
+  </refnamediv>
+
+  <refsynopsisdiv>
+    <para><simplelist>
+      <member><filename>/etc/systemd/device-accept.conf</filename></member>
+      <member><filename>/run/systemd/device-accept.conf</filename></member>
+      <member><filename>/usr/local/lib/systemd/device-accept.conf</filename></member>
+      <member><filename>/usr/lib/systemd/device-accept.conf</filename></member>
+      <member><filename>/etc/systemd/device-accept.conf.d/*.conf</filename></member>
+      <member><filename>/run/systemd/device-accept.conf.d/*.conf</filename></member>
+      <member><filename>/usr/local/lib/systemd/device-accept.conf.d/*.conf</filename></member>
+      <member><filename>/usr/lib/systemd/device-accept.conf.d/*.conf</filename></member>
+    </simplelist></para>
+  </refsynopsisdiv>
+
+  <refsect1>
+    <title>Description</title>
+
+    <para>These files configure
+    <citerefentry><refentrytitle>systemd-device-accept-d.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+    which applies the device acceptance configuration from
+    <citerefentry><refentrytitle>accept.d</refentrytitle><manvolnum>5</manvolnum></citerefentry>. See
+    <citerefentry><refentrytitle>systemd.syntax</refentrytitle><manvolnum>7</manvolnum></citerefentry>
+    for a general description of the syntax.</para>
+  </refsect1>
+
+  <xi:include href="standard-conf.xml" xpointer="main-conf" />
+
+  <refsect1>
+    <title>[DeviceAccept] Section Options</title>
+
+    <para>The following options are available in the [DeviceAccept] section:</para>
+
+    <variablelist class='config-directives'>
+      <varlistentry>
+        <term><varname>HoldProbing=</varname></term>
+
+        <listitem><para>Takes a whitespace-separated list of bus names, such as <literal>pci</literal>. While
+        the service runs, the kernel does not probe drivers for the devices on these buses on its own:
+        neither for devices that are added, nor for devices without a driver when a driver for them is
+        loaded. This is achieved by writing <literal>0</literal> to the
+        <filename>drivers_autoprobe</filename> attribute of the bus, for example
+        <filename>/sys/bus/pci/drivers_autoprobe</filename>. Instead, the service binds drivers to these
+        devices once it has applied the configuration from
+        <citerefentry><refentrytitle>accept.d</refentrytitle><manvolnum>5</manvolnum></citerefentry> to
+        them. This way, the trust policy of a device is in place before a driver is probed for it, also for
+        devices that are added while the system runs, regardless of whether their driver is loaded
+        already. Driver probing is only held while there is acceptance configuration, i.e. while at least
+        one valid file in <filename>accept.d/</filename> exists. Without any, the default policy of the
+        kernel applies.</para>
+
+        <para>A device on one of these buses that a file selects goes through the acceptance flow described in
+        <citerefentry><refentrytitle>systemd-device-accept-d.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+        first, which applies its requested policy through <filename>trust_policy</filename>, and a driver
+        is only bound to it if the policy could be applied and is not <option>disabled</option>. A device
+        that no file selects gets a driver right away. Devices without a matching driver are retried when
+        a driver is registered on their bus or another device is bound. Deferred probes are also retried
+        periodically. After a driver is explicitly unbound, probing waits for a new driver registration
+        on that bus or a configuration reload, which restarts the acceptance flow.</para>
+
+        <para>A failed or deferred probe can make <filename>trust_policy</filename> immutable even though
+        the device has no driver. Reloading the configuration retries unbound devices, but can only change
+        their policy if the kernel has not started matching or probing a driver for them. Unbinding a
+        driver does not make the policy writable again.</para>
+
+        <para>A bus that does not exist when the service is started, because the module that provides it is
+        not loaded yet, is held after its registration is observed. This is also done when a bus is
+        removed and registered again. Devices may be probed before the registration event is processed.
+        Before a bus is held, and before the service is started,
+        drivers are probed as usual, which in particular applies to the drivers built into the kernel during
+        boot. When the service is stopped, which includes switching from the initrd to the root file
+        system, the <filename>drivers_autoprobe</filename> attribute of these buses is set back to the value
+        it had before the service turned probing off, until the service is started again. The original value
+        is kept in <filename>/run/systemd/device-accept/</filename>, so that it is restored also if the
+        service has been restarted in between, for example after a crash. Devices that were not bound to a
+        driver at that point are probed by the kernel only when a driver for them is loaded afterwards, and
+        only if automatic probing was turned on originally.</para>
+
+        <para>Note that some kernel subsystems bind drivers to devices directly, regardless of this setting,
+        and so does writing to the <filename>bind</filename> attribute of a driver. Also note that the
+        <filename>sriov_drivers_autoprobe</filename> attribute of a PCI device is not a replacement for
+        this setting: it only makes the probing of the drivers for the virtual functions of the device
+        fail, which means that their trust policy cannot be changed anymore afterwards.</para>
+
+        <para>This option may be specified more than once, in which case the buses are added to the list. If
+        an empty string is assigned, the list is reset. Defaults to empty, i.e. driver probing is left to the
+        kernel.</para>
+
+        <xi:include href="version-info.xml" xpointer="v263"/></listitem>
+      </varlistentry>
+    </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>Example</title>
+
+    <example>
+      <title>Accept PCI devices before probing their drivers</title>
+
+      <para><filename>/etc/systemd/device-accept.conf.d/50-pci.conf</filename>:</para>
+
+      <programlisting>[DeviceAccept]
+HoldProbing=pci</programlisting>
+    </example>
+  </refsect1>
+
+  <refsect1>
+    <title>See Also</title>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd-device-accept-d.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>accept.d</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+    </simplelist></para>
+  </refsect1>
+
+</refentry>

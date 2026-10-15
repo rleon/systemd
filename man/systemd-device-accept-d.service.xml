@@ -1,0 +1,213 @@
+<?xml version="1.0"?>
+<!--*-nxml-*-->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
+<refentry id="systemd-device-accept-d.service"
+          xmlns:xi="http://www.w3.org/2001/XInclude">
+
+  <refentryinfo>
+    <title>systemd-device-accept-d.service</title>
+    <productname>systemd</productname>
+  </refentryinfo>
+
+  <refmeta>
+    <refentrytitle>systemd-device-accept-d.service</refentrytitle>
+    <manvolnum>8</manvolnum>
+  </refmeta>
+
+  <refnamediv>
+    <refname>systemd-device-accept-d.service</refname>
+    <refname>systemd-device-accept-d</refname>
+    <refpurpose>Apply the device acceptance configuration</refpurpose>
+  </refnamediv>
+
+  <refsynopsisdiv>
+    <para><filename>systemd-device-accept-d.service</filename></para>
+    <cmdsynopsis>
+      <command>/usr/lib/systemd/systemd-device-accept-d</command>
+      <arg choice="opt" rep="repeat">OPTIONS</arg>
+    </cmdsynopsis>
+  </refsynopsisdiv>
+
+  <refsect1>
+    <title>Description</title>
+
+    <para><filename>systemd-device-accept-d.service</filename> is a system service that applies the device
+    acceptance configuration to devices, i.e. it writes the requested trust policy configured for a device in
+    <citerefentry><refentrytitle>accept.d</refentrytitle><manvolnum>5</manvolnum></citerefentry> to the
+    <filename>trust_policy</filename> attribute in the sysfs directory of the device. The separate read-only
+    <filename>trust</filename> attribute reports the active level resolved by the kernel for the current
+    binding, or <literal>disabled</literal> when no driver is bound.</para>
+
+    <para>The kernel only allows changing the requested policy before the first matching or probing attempt
+    that locks it. A failed or deferred probe and unbinding the driver do not make it writable again.
+    Hence the service is part of <filename>sysinit.target</filename>, and thus also runs in the initrd,
+    once sysfs is available with the devices the kernel has registered so far. When it is started, it applies
+    the configuration to the devices that exist already, and only then reports that start-up is complete. It is
+    ordered before <filename>systemd-udevd.service</filename>, which loads the kernel modules for devices, and
+    before any other service that loads kernel modules. After that, the service keeps running and listens to
+    the uevents of the kernel, and applies the configuration to devices as they are added, for example by
+    hotplug. Only <literal>add</literal> uevents are considered.</para>
+
+    <para>The service is only started if one of the <filename>accept.d/</filename> directories is not empty.
+    Failing to apply the trust level to a device is logged, and the service carries on. When the system
+    switches from the initrd to the root file system, the service is stopped, and started again with the
+    configuration of the root file system. To have devices configured in the initrd, the configuration files
+    and the service have to be included in the initrd.</para>
+
+    <para>Note that the trust level cannot be changed for devices that have been probed already, for example
+    because their drivers are built into the kernel, or because they were added before the service was
+    started. When a device is added while its driver is loaded, the kernel probes it right away. When the
+    driver is a kernel module that is not loaded yet, the service handles the uevent of the device in parallel
+    to <filename>systemd-udevd.service</filename>, which loads the module. The service gets the uevent
+    directly from the kernel and only writes a sysfs attribute, which is usually done long before udev has
+    processed the uevent, but this is not guaranteed. The trust levels of the devices that drivers built into
+    the kernel might be bound to are passed on the kernel command line instead, see below.</para>
+
+    <para>For devices on the buses listed in <varname>HoldProbing=</varname> in
+    <citerefentry><refentrytitle>device-accept.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
+    the kernel does not probe drivers on its own while the service runs, which avoids both problems for
+    devices that are added later. The service binds drivers to these devices itself, once it has applied the
+    configuration to them.</para>
+  </refsect1>
+
+  <refsect1>
+    <title>Acceptance Flow</title>
+
+    <para>The service decides whether a driver is bound to a device that has none yet and is on one of the
+    buses listed in <varname>HoldProbing=</varname> in
+    <citerefentry><refentrytitle>device-accept.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+    If a file in <citerefentry><refentrytitle>accept.d</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+    selects the device, it goes through these steps, in this order:</para>
+
+    <orderedlist>
+      <listitem><para><literal>connect</literal>: make an SPDM connection to the device, which authenticates
+      it.</para></listitem>
+
+      <listitem><para><literal>measure</literal>: obtain the measurements of the device.</para></listitem>
+
+      <listitem><para><literal>log</literal>: write the measurements to a log.</para></listitem>
+
+      <listitem><para><literal>extend</literal>: extend the log into the root of trust.</para></listitem>
+
+      <listitem><para><literal>verify</literal>: run a local verifier on the measurements.</para></listitem>
+
+      <listitem><para><literal>run</literal>: put the device into the TDISP RUN state.</para></listitem>
+
+      <listitem><para><literal>bind</literal>: apply the trust level, and bind a driver to the device, unless
+      the trust level could not be applied or is <literal>disabled</literal>.</para></listitem>
+    </orderedlist>
+
+    <para>If a step fails, the device is rejected: the remaining steps are skipped, its trust level is set to
+    <literal>disabled</literal>, and no driver is bound to it. A device that no file selects is bound to a
+    driver right away, as it would be by the kernel. A device that is accepted, but no driver could be bound to,
+    for example because none is loaded yet, waits for one: it is probed again when a driver is registered on
+    its bus, and when a driver has been bound to any other device. On reload, the devices that wait for a
+    driver and the ones that have been rejected go through the steps again, with the new
+    configuration.</para>
+
+    <para>Note that the steps before <literal>bind</literal> are not implemented yet, and are skipped: the
+    kernel does not provide the interfaces for making an SPDM connection to a device, for obtaining its
+    measurements and for changing its TDISP state yet, and the other steps build on these.</para>
+  </refsect1>
+
+  <refsect1>
+    <title>Built-in Drivers</title>
+
+    <para>The kernel probes the drivers that are built into it for the devices that exist at boot before the
+    service is started, so that the service cannot change the trust levels of these devices anymore. Hence
+    their trust levels are passed on the kernel command line, with the option
+    <varname>device_trust=<replaceable>BUS</replaceable>:<replaceable>DEVICE</replaceable>=<replaceable>LEVEL</replaceable>,…</varname>,
+    where <replaceable>DEVICE</replaceable> is the name of the device on the bus.
+    <option>--kernel-cmdline</option> prints this option. It lists the devices that exist, are selected by the
+    configuration, and that a built-in driver might be bound to: the
+    devices that are bound to one, and the ones whose modalias matches an alias of a built-in module. The
+    devices that the option on the command line of the running kernel lists stay listed if the configuration
+    still selects them, as their trust policy might be the reason that no driver is bound to them. An explicit
+    <literal>default</literal> is included, since it may override a policy initially chosen by the bus.
+    Note that the length of the kernel command line is
+    limited, to 2048 bytes on many architectures, hence the configuration should select the devices
+    precisely.</para>
+
+    <para>When a kernel is installed with
+    <citerefentry><refentrytitle>kernel-install</refentrytitle><manvolnum>8</manvolnum></citerefentry>, its
+    plugin <filename>55-device-accept.install</filename> stages this option for the boot loader entry or the
+    unified kernel image. When the command line is inherited from <filename>/proc/cmdline</filename>,
+    existing <varname>device_trust=</varname> options are replaced by the current generated policy. This also
+    removes an old policy when the last matching configuration file is deleted. To retain a manually supplied
+    policy across kernel installations, specify it in <filename>/etc/kernel/cmdline</filename> or another
+    explicit command-line configuration source. An explicit <varname>device_trust=</varname> option takes
+    precedence over the generated policy, including one set through <varname>Cmdline=</varname> in
+    <filename>uki.conf</filename> or a file it references. The plugin does nothing in a container or a chroot, where the
+    devices are not the ones of the machine the kernel is installed for. Hence the kernel has to be installed
+    again after such devices have been added, or the configuration has been changed, e.g. with
+    <command>kernel-install add-all</command>.</para>
+  </refsect1>
+
+  <refsect1>
+    <title>Options</title>
+
+    <variablelist>
+      <varlistentry>
+        <term><option>-n</option></term>
+        <term><option>--dry-run</option></term>
+
+        <listitem><para>Do not change anything and do not wait for uevents, only print the devices that exist
+        and are selected by the configuration, along with the trust level that would be applied and the file
+        that selects them, and exit. Exits with a non-zero exit status if the trust level cannot be applied
+        to some of these devices, for example because they do not have the attribute. The buses listed in
+        <varname>HoldProbing=</varname> are logged, but driver probing is not changed for them.</para>
+
+        <xi:include href="version-info.xml" xpointer="v263"/></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--kernel-cmdline<optional>=<replaceable>VERSION</replaceable></optional></option></term>
+
+        <listitem><para>Do not change anything and do not wait for uevents, only print the kernel command line
+        option with the trust levels of the devices that a built-in driver might be bound to, see above, and
+        exit. Nothing is printed if there are none. The modules of the kernel of the specified version, or of
+        the running kernel if none is specified, are read from <filename>modules.dep</filename> and
+        <filename>modules.builtin.modinfo</filename> in
+        <filename>/usr/lib/modules/<replaceable>VERSION</replaceable>/</filename>. If these files do not exist,
+        all the devices that are selected are listed.</para>
+
+        <xi:include href="version-info.xml" xpointer="v263"/></listitem>
+      </varlistentry>
+
+      <xi:include href="standard-options.xml" xpointer="help" />
+      <xi:include href="standard-options.xml" xpointer="version" />
+    </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>Signals</title>
+
+    <variablelist>
+      <varlistentry>
+        <term><constant>SIGHUP</constant></term>
+
+        <listitem><para>Upon reception of the <constant>SIGHUP</constant> process signal,
+        <command>systemd-device-accept-d</command> reloads the configuration files, turns driver probing off
+        or back on for the buses that were added to or removed from <varname>HoldProbing=</varname>, and
+        applies the configuration to the devices that exist again. Use <command>systemctl reload
+        systemd-device-accept-d.service</command> to do this, which returns once it is done.</para>
+
+        <xi:include href="version-info.xml" xpointer="v263"/></listitem>
+      </varlistentry>
+    </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>See Also</title>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>accept.d</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>device-accept.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>kernel-install</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd-udevd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+    </simplelist></para>
+  </refsect1>
+
+</refentry>

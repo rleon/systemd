@@ -1,0 +1,325 @@
+<?xml version='1.0'?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
+
+<refentry id="accept.d"
+          xmlns:xi="http://www.w3.org/2001/XInclude">
+  <refentryinfo>
+    <title>accept.d</title>
+    <productname>systemd</productname>
+  </refentryinfo>
+
+  <refmeta>
+    <refentrytitle>accept.d</refentrytitle>
+    <manvolnum>5</manvolnum>
+  </refmeta>
+
+  <refnamediv>
+    <refname>accept.d</refname>
+    <refpurpose>Device acceptance configuration</refpurpose>
+  </refnamediv>
+
+  <refsynopsisdiv>
+    <para><simplelist>
+      <member><filename>/etc/systemd/accept.d/*.conf</filename></member>
+      <member><filename>/run/systemd/accept.d/*.conf</filename></member>
+      <member><filename>/usr/local/lib/systemd/accept.d/*.conf</filename></member>
+      <member><filename>/usr/lib/systemd/accept.d/*.conf</filename></member>
+    </simplelist></para>
+
+    <programlisting>[Match]
+Device=pci:0000:01:00.0 name:mlx5_*
+
+[Accept]
+TrustLevel=adversary</programlisting>
+  </refsynopsisdiv>
+
+  <refsect1>
+    <title>Description</title>
+
+    <para>The <filename>accept.d/</filename> directories contain plain ini-style text files that select
+    devices and configure how the kernel may access and operate them. Currently, this is the trust level of
+    a device, which is written to the <filename>trust_policy</filename> attribute in the sysfs directory of the
+    device. See
+    <citerefentry><refentrytitle>systemd.syntax</refentrytitle><manvolnum>7</manvolnum></citerefentry> for a
+    general description of the syntax.</para>
+
+    <para>The configuration is applied by
+    <citerefentry><refentrytitle>systemd-device-accept-d.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
+    During boot, it applies the configuration to the devices that exist when it is started, before udev
+    loads the kernel modules for them, and after that to the devices that are added, for example by hotplug.
+    It only applies the configuration when a device is added, since the trust level of a device can only be
+    changed until a driver has been probed for the device. To have the configuration applied in the initrd,
+    the files, as well as the service, have to be included in the initrd. After the files have been changed,
+    use <command>systemctl reload systemd-device-accept-d.service</command> to apply them to the devices that
+    exist.</para>
+
+    <para>Note that this cannot change the trust level of devices that have been probed already, for
+    example because their drivers are built into the kernel, or because they were set up before the
+    configuration was available. The trust levels of the devices that built-in drivers might be bound to are
+    passed on the kernel command line when the kernel is installed, see "Built-in Drivers" in
+    <citerefentry><refentrytitle>systemd-device-accept-d.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
+    Failing to apply the trust level to a device is logged. See
+    <varname>HoldProbing=</varname> in
+    <citerefentry><refentrytitle>device-accept.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+    for having drivers bound to the devices on some buses only after the configuration has been applied to
+    them, in which case no driver is bound to a device whose trust level could not be applied, or is
+    <option>disabled</option>.</para>
+
+    <para>The files are read from the directories <filename>/usr/lib/systemd/accept.d/</filename> and
+    <filename>/usr/local/lib/systemd/accept.d/</filename>
+    <xi:include href="standard-conf.xml" xpointer="usr-local-footnote" />,
+    the volatile runtime directory <filename>/run/systemd/accept.d/</filename>, and the local administration
+    directory <filename>/etc/systemd/accept.d/</filename>. All files are collectively sorted and processed in
+    alphanumeric order, regardless of the directories in which they live. However, files with identical
+    filenames replace each other. Files in <filename>/etc/</filename> have the highest priority, files in
+    <filename>/run/</filename> take precedence over files with the same name in
+    <filename>/usr/lib/</filename>. This can be used to override a system-supplied file with a local file if
+    needed. As a special case, an empty file (file size 0) or symlink with the same name pointing to
+    <filename>/dev/null</filename> disables the configuration file entirely (it is "masked"). Only files with
+    the suffix <literal>.conf</literal> are read.</para>
+
+    <para>Along with the file <filename>foo.conf</filename>, a "drop-in" directory
+    <filename>foo.conf.d/</filename> may exist. All files with the suffix <literal>.conf</literal> from this
+    directory will be merged in the alphanumeric order and parsed after the main file itself has been
+    parsed. This is useful to alter or add configuration settings, without having to modify the main
+    configuration file. Each drop-in file must have appropriate section headers. Drop-in directories can be
+    placed in any of the directories above. Drop-in files in <filename>/etc/</filename> take precedence over
+    those in <filename>/run/</filename>, which in turn take precedence over those in
+    <filename>/usr/lib/</filename>. Drop-in files under any of these directories take precedence over the
+    main file wherever located. Note that the <filename>accept.d/</filename> directories are not drop-in
+    directories of a main configuration file themselves, but contain the main files, which may have drop-in
+    directories of their own.</para>
+
+    <para>Each file contains a [Match] section, which selects the devices the file applies to, and an
+    [Accept] section, which specifies how to configure these devices. The first (in lexicographic order) of
+    the files that selects a given device is applied to it. All later files are ignored for this device, even
+    if they select it as well. Hence, to override the setting of a file for some devices, use a file that
+    sorts before it. No files are installed by default.</para>
+
+    <para>Files that do not contain at least one valid selector in their <varname>Device=</varname>
+    settings, as well as a valid <varname>TrustLevel=</varname> setting, are ignored, and a warning is
+    logged. Use <command>/usr/lib/systemd/systemd-device-accept-d --dry-run</command> to see which devices
+    the files select, see below.</para>
+  </refsect1>
+
+  <refsect1>
+    <title>[Match] Section Options</title>
+
+    <para>The following keys are accepted:</para>
+
+    <variablelist class='config-directives'>
+      <varlistentry>
+        <term><varname>Device=</varname></term>
+        <listitem>
+          <para>A whitespace-separated list of selectors, each of which selects devices. A device is
+          selected by a file if it is selected by any of the selectors in any of the
+          <varname>Device=</varname> settings of it. This option may be specified more than once, in which
+          case the selectors are added to the list. If an empty string is assigned, the list is reset to its
+          initial state, i.e. it is emptied. A selector that is not valid is ignored, and a warning is
+          logged.</para>
+
+          <para>A selector has the form <literal><replaceable>type</replaceable>:<replaceable>value</replaceable></literal>.
+          The type is mandatory and case-sensitive, so that a value is never interpreted differently than
+          intended. The following types are supported:</para>
+
+          <variablelist>
+            <varlistentry>
+              <term><literal>name:<replaceable>name</replaceable></literal></term>
+              <listitem>
+                <para>Selects the devices whose kernel name matches the shell-style glob
+                <replaceable>name</replaceable>, in any subsystem. The kernel name of a device is the last
+                component of its sysfs path, such as <literal>mlx5_0</literal> or
+                <literal>eth0</literal>. Note that the kernel name of a PCI device is its PCI address,
+                <literal>0000:01:00.0</literal> for example. Neither the names of devices that are parents
+                of the device, nor alternative names, are considered. Also note that kernel names are not
+                necessarily unique, and that network interfaces may be renamed, see
+                <citerefentry><refentrytitle>systemd.link</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+                The name a device has when the configuration is applied to it is used.</para>
+
+                <xi:include href="version-info.xml" xpointer="v263"/>
+              </listitem>
+            </varlistentry>
+
+            <varlistentry>
+              <term><literal>pci:[<replaceable>domain</replaceable>:]<replaceable>bus</replaceable>:<replaceable>device</replaceable>.<replaceable>function</replaceable></literal></term>
+              <listitem>
+                <para>Selects the PCI device with the given address, as shown by
+                <citerefentry project='man-pages'><refentrytitle>lspci</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+                for example <literal>pci:0000:01:00.0</literal>. The address consists of hexadecimal
+                numbers, of which the case does not matter: the domain, with four to eight digits, the bus,
+                with two digits, the device, with two digits and a value of up to <literal>1f</literal>, and
+                the function, with a single digit of up to <literal>7</literal>. The domain is optional,
+                and <literal>0000</literal> if left out, i.e. <literal>pci:01:00.0</literal> is the same as
+                <literal>pci:0000:01:00.0</literal>. Only the PCI device itself is selected, but none of the
+                devices that are below it, such as network interfaces or RDMA devices. Globs are not
+                supported.</para>
+
+                <xi:include href="version-info.xml" xpointer="v263"/>
+              </listitem>
+            </varlistentry>
+
+            <varlistentry>
+              <term><literal>path:<replaceable>path</replaceable></literal></term>
+              <listitem>
+                <para>Selects the devices whose sysfs path matches the shell-style glob
+                <replaceable>path</replaceable>, for example
+                <literal>path:/sys/devices/pci0000:00/0000:00:1c.0/0000:05:00.0</literal>. The path must be
+                a path below <filename>/sys/devices/</filename>. The <filename>/sys</filename> prefix may
+                be left out, as in <literal>path:/devices/platform/foo</literal>. In globs, wildcards do not
+                match slashes. Only the device with the given path is selected, but none of the devices that
+                are below it. Paths to symlinks of devices, such as the ones in
+                <filename>/sys/bus/</filename> and <filename>/sys/class/</filename>, are not supported,
+                since they are not resolved. Use the canonical path of the device, or
+                <literal>pci:</literal> for PCI devices, instead.</para>
+
+                <xi:include href="version-info.xml" xpointer="v263"/>
+              </listitem>
+            </varlistentry>
+          </variablelist>
+
+          <para>Since the selectors of a file are alternatives, a file can select any number of devices,
+          of any of the types above, and all of them get the same trust level. To give devices different
+          trust levels, use different files.</para>
+
+          <xi:include href="version-info.xml" xpointer="v263"/>
+        </listitem>
+      </varlistentry>
+    </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>[Accept] Section Options</title>
+
+    <para>The following keys are accepted:</para>
+
+    <variablelist class='config-directives'>
+      <varlistentry>
+        <term><varname>TrustLevel=</varname></term>
+        <listitem>
+          <para>The trust level to configure for the devices that are selected by the file, which is
+          written to the <filename>trust_policy</filename> attribute of the device. The read-only
+          <filename>trust</filename> attribute reports the active level resolved when a driver binds.
+          The trust level tells how the kernel operates a device. It does not tell anything about the
+          identity of the device, and does
+          not attest its firmware. One of the following values, which are case-sensitive:</para>
+
+          <variablelist>
+            <varlistentry>
+              <term><option>default</option></term>
+              <listitem>
+                <para>Let the bus of the device select the trust level.</para>
+
+                <xi:include href="version-info.xml" xpointer="v263"/>
+              </listitem>
+            </varlistentry>
+
+            <varlistentry>
+              <term><option>disabled</option></term>
+              <listitem>
+                <para>Do not allow any driver to bind to the device.</para>
+
+                <xi:include href="version-info.xml" xpointer="v263"/>
+              </listitem>
+            </varlistentry>
+
+            <varlistentry>
+              <term><option>adversary</option></term>
+              <listitem>
+                <para>Operate the device as a potentially malicious device, with the restrictions this
+                requires.</para>
+
+                <xi:include href="version-info.xml" xpointer="v263"/>
+              </listitem>
+            </varlistentry>
+
+            <varlistentry>
+              <term><option>full</option></term>
+              <listitem>
+                <para>Operate the device with the usual privileges.</para>
+
+                <xi:include href="version-info.xml" xpointer="v263"/>
+              </listitem>
+            </varlistentry>
+          </variablelist>
+
+          <para>This setting is required. If an empty string is assigned, the setting is reset to its
+          initial state, i.e. it is not set. If the device already has the trust level, nothing is
+          written. Failing to change it is logged, which is the case if the device does not have the
+          attribute, because the kernel does not support it, or if a matching probe has been attempted
+          already, including a failed or deferred probe. Unbinding does not make the policy writable again.
+          Note that it is up to the kernel to define the exact meaning of the trust levels.</para>
+
+          <xi:include href="version-info.xml" xpointer="v263"/>
+        </listitem>
+      </varlistentry>
+    </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>Examples</title>
+
+    <example>
+      <title>Operate a PCI network controller as potentially malicious</title>
+
+      <para><filename>/etc/systemd/accept.d/10-external-nic.conf</filename>:</para>
+
+      <programlisting>[Match]
+Device=pci:0000:05:00.0
+
+[Accept]
+TrustLevel=adversary</programlisting>
+
+      <para>Select the controller itself: configuring a network interface does not change the policy of
+      its parent PCI device or the driver bound to that parent.</para>
+    </example>
+
+    <example>
+      <title>Disable the devices below a PCI bridge port, but one</title>
+
+      <para>The wildcard in the second file selects the devices that are directly below the PCI bridge. As
+      the files are processed in alphanumeric order, and the first file that selects a device is applied, the
+      first file here takes the one device it names out of the second one.</para>
+
+      <para><filename>/etc/systemd/accept.d/10-keep.conf</filename>:</para>
+
+      <programlisting>[Match]
+Device=pci:0000:06:00.0
+
+[Accept]
+TrustLevel=default</programlisting>
+
+      <para><filename>/etc/systemd/accept.d/20-disable-slot.conf</filename>:</para>
+
+      <programlisting>[Match]
+Device=path:/sys/devices/pci0000:00/0000:00:1c.4/*
+
+[Accept]
+TrustLevel=disabled</programlisting>
+    </example>
+
+    <example>
+      <title>Check what applies to the devices</title>
+
+      <para>To see which devices the files select, which trust level they get, and from which file, without
+      changing anything:</para>
+
+      <programlisting># /usr/lib/systemd/systemd-device-accept-d --dry-run
+/sys/devices/pci0000:00/0000:00:1c.0/0000:05:00.0: adversary (/etc/systemd/accept.d/10-external-nic.conf)
+/sys/devices/pci0000:00/0000:00:1c.0/0000:05:00.0/net/enp5s0: adversary (/etc/systemd/accept.d/10-external-nic.conf)</programlisting>
+    </example>
+  </refsect1>
+
+  <refsect1>
+    <title>See Also</title>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd-device-accept-d.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>device-accept.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd-udevd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd.link</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+    </simplelist></para>
+  </refsect1>
+
+</refentry>
