@@ -24,6 +24,18 @@ executables += [
                 'sources' : files('test-accept-config.c'),
                 'import' : ['systemd-device-accept-d'],
         },
+        test_template + {
+                'sources' : files('test-device-accept-d.c'),
+                'import' : ['systemd-device-accept-d'],
+                'link_args' : [
+                        '-Wl,--wrap=read_one_line_file_at',
+                        '-Wl,--wrap=write_string_file_full_label',
+                        '-Wl,--wrap=faccessat',
+                        '-Wl,--wrap=readlink_value',
+                        '-Wl,--wrap=sd_device_new_from_syspath',
+                        '-Wl,--wrap=sd_device_get_driver',
+                ],
+        },
         fuzz_template + {
                 'sources' : files('fuzz-accept-parser.c'),
                 'import' : ['systemd-device-accept-d'],
@@ -31,6 +43,12 @@ executables += [
 ]
 
 install_emptydir(libexecdir / 'accept.d', install_tag : 'udev')
+
+if install_sysconfdir_samples
+        install_data('device-accept.conf',
+                     install_dir : pkgconfigfiledir,
+                     install_tag : 'udev')
+endif
 
 if install_sysconfdir
         install_emptydir(sysconfdir / 'systemd/accept.d', install_tag : 'udev')
