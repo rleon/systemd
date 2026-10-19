@@ -183,7 +183,7 @@ def devicetree_file_location(opts) -> Optional[Path]:
     return path
 
 
-def kernel_cmdline_base() -> list[str]:
+def kernel_cmdline_base(*, regenerate_device_trust=False) -> list[str]:
     path = input_file_location('cmdline')
     if path:
         # Filter out commented out lines from cmdline.
@@ -211,11 +211,14 @@ def kernel_cmdline_base() -> list[str]:
     # If we read /proc/cmdline, we need to do some additional filtering.
     options = Path('/proc/cmdline').read_text().split()
     return [opt for opt in options
-            if not opt.startswith(('BOOT_IMAGE=', 'initrd='))]
+            if not opt.startswith(('BOOT_IMAGE=', 'initrd='))
+            and not (regenerate_device_trust and opt.startswith('device_trust='))]
 
 
 def kernel_cmdline(opts) -> str:
-    options = kernel_cmdline_base()
+    # The generated file may be empty after the last acceptance rule was removed.
+    options = kernel_cmdline_base(
+        regenerate_device_trust=(opts.staging_area / 'cmdline-device-accept').is_file())
 
     # If the boot entries are named after the machine ID, then suffix the kernel
     # command line with the machine ID we use, so that the machine ID remains
@@ -230,6 +233,14 @@ def kernel_cmdline(opts) -> str:
 
     # Prepend a space so that '@' does not get misinterpreted
     return ' ' + ' '.join(options)
+
+
+def kernel_cmdline_staged(opts, *, device_trust_configured=False) -> list[str]:
+    return [opt
+            for path in sorted(opts.staging_area.glob('cmdline*'))
+            if path.is_file()
+            and not (device_trust_configured and path.name == 'cmdline-device-accept')
+            for opt in path.read_text().split()]
 
 
 def initrd_list(opts) -> list[Path]:
@@ -272,6 +283,15 @@ def call_ukify(opts) -> None:
     # if cmdline is not provided through config file, fall back to the current cmdline
     if opts2.cmdline is None:
         opts2.cmdline = kernel_cmdline(opts)
+
+    cmdline = ukify.resolve_at_path(opts2.cmdline)
+    if isinstance(cmdline, Path):
+        cmdline = cmdline.read_text()
+    # An explicit device_trust= policy, including UKI/Cmdline= and @file, takes precedence.
+    if staged := kernel_cmdline_staged(
+            opts, device_trust_configured=any(opt.startswith('device_trust=') for opt in cmdline.split())):
+        # Prepend a space so that '@' does not get misinterpreted
+        opts2.cmdline = ' ' + ' '.join([*cmdline.split(), *staged])
     ukify.finalize_options(opts2)
     ukify.check_inputs(opts2)
     ukify.make_uki(opts2)

@@ -91,6 +91,74 @@ test ! -e "$entry"
 test ! -e "$BOOT_ROOT/the-token/1.1.1/linux"
 test ! -e "$BOOT_ROOT/the-token/1.1.1/initrd"
 
+cat >"$D/10-cmdline.install" <<'EOF'
+#!/bin/sh
+[ "$1" = add ] || exit 0
+printf 'staged1\nstaged2\n' >"$KERNEL_INSTALL_STAGING_AREA/cmdline-test"
+EOF
+chmod +x "$D/10-cmdline.install"
+
+KERNEL_INSTALL_PLUGINS="'$D/10-cmdline.install' '${loaderentry_install}'" \
+    "$kernel_install" -v add 1.1.1 "$D/sources/linux" "$D/sources/initrd"
+grep -qE '^options +opt1 opt2 staged1 staged2$' "$entry"
+"$kernel_install" -v remove 1.1.1
+test ! -e "$entry"
+
+cat >"$D/55-test-device-accept.install" <<'EOF'
+#!/bin/sh
+[ "$1" = add ] || exit 0
+printf '%s\n' "$TEST_DEVICE_TRUST_OPTION" >"$KERNEL_INSTALL_STAGING_AREA/cmdline-device-accept"
+EOF
+chmod +x "$D/55-test-device-accept.install"
+
+# Explicit administrator policy must take precedence over the generated policy.
+echo 'device_trust=pci:0000:01:00.0=disabled' >>"$D/sources/cmdline"
+TEST_DEVICE_TRUST_OPTION='device_trust=pci:0000:01:00.0=default' \
+    KERNEL_INSTALL_PLUGINS="'$D/55-test-device-accept.install' '${loaderentry_install}'" \
+    "$kernel_install" -v add 1.1.1 "$D/sources/linux"
+grep -qE '^options +opt1 opt2 device_trust=pci:0000:01:00.0=disabled$' "$entry"
+"$kernel_install" -v remove 1.1.1
+sed -i '/^device_trust=/d' "$D/sources/cmdline"
+
+# Exercise the /proc/cmdline fallback without depending on the test host's command line or virtualization.
+mkdir "$D/bin"
+cat >"$D/bin/systemd-detect-virt" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+sed -e "s@/proc/cmdline@$D/proc-cmdline@g" \
+    -e "s@/etc/kernel/@$D/empty-kernel-conf/@g" \
+    -e "s@/usr/lib/kernel/@$D/empty-kernel-conf/@g" \
+    "$loaderentry_install" >"$D/loaderentry-proc.install"
+cat >"$D/90-loaderentry-proc.install" <<'EOF'
+#!/bin/sh
+KERNEL_INSTALL_CONF_ROOT= exec "$TEST_LOADERENTRY_PROC" "$@"
+EOF
+chmod +x "$D/bin/systemd-detect-virt" "$D/loaderentry-proc.install" "$D/90-loaderentry-proc.install"
+echo 'BOOT_IMAGE=/vmlinuz root=fake device_trust=pci:0000:02:00.0=adversary quiet device_trust=pci:0000:01:00.0=disabled' \
+    >"$D/proc-cmdline"
+
+# If generation is skipped, inherit the previous options unchanged.
+PATH="$D/bin:$PATH" TEST_LOADERENTRY_PROC="$D/loaderentry-proc.install" \
+    KERNEL_INSTALL_PLUGINS="'$D/90-loaderentry-proc.install'" \
+    "$kernel_install" -v add 1.1.1 "$D/sources/linux"
+grep -qE '^options +root=fake device_trust=pci:0000:02:00.0=adversary quiet device_trust=pci:0000:01:00.0=disabled$' "$entry"
+"$kernel_install" -v remove 1.1.1
+
+# A generated default replaces all inherited policies, and deleting the final rule removes them entirely.
+for policy in 'device_trust=pci:0000:01:00.0=default' ''; do
+    PATH="$D/bin:$PATH" TEST_LOADERENTRY_PROC="$D/loaderentry-proc.install" \
+        TEST_DEVICE_TRUST_OPTION="$policy" \
+        KERNEL_INSTALL_PLUGINS="'$D/55-test-device-accept.install' '$D/90-loaderentry-proc.install'" \
+        "$kernel_install" -v add 1.1.1 "$D/sources/linux"
+    if [[ -n "$policy" ]]; then
+        grep -qE '^options +root=fake quiet device_trust=pci:0000:01:00.0=default$' "$entry"
+    else
+        grep -qE '^options +root=fake quiet$' "$entry"
+    fi
+    "$kernel_install" -v remove 1.1.1
+done
+
 # Test again with too many arguments for 'remove' command. See #28448.
 "$kernel_install" -v add 1.1.1 "$D/sources/linux" "$D/sources/initrd"
 

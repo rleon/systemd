@@ -90,12 +90,37 @@ elif [ -f /etc/kernel/cmdline ]; then
 elif [ -f /usr/lib/kernel/cmdline ]; then
     BOOT_OPTIONS="$(grep -Gv '^\s*#' /usr/lib/kernel/cmdline | tr -s "$IFS" ' ')"
 elif ! systemd-detect-virt --container --quiet; then
-    BOOT_OPTIONS="$(tr -s "$IFS" '\n' </proc/cmdline | grep -ve '^BOOT_IMAGE=' -e '^initrd=' | tr '\n' ' ')"
+    REGENERATE_DEVICE_TRUST=0
+    [ ! -f "$KERNEL_INSTALL_STAGING_AREA/cmdline-device-accept" ] || REGENERATE_DEVICE_TRUST=1
+    BOOT_OPTIONS="$(tr -s "$IFS" '\n' </proc/cmdline |
+        awk -v regenerate="$REGENERATE_DEVICE_TRUST" '
+            !/^BOOT_IMAGE=/ && !/^initrd=/ && (!regenerate || !/^device_trust=/) { print }
+        ' | tr '\n' ' ')"
 else
     BOOT_OPTIONS=""
 fi
 
 BOOT_OPTIONS="${BOOT_OPTIONS% }"
+
+# An explicit policy from a command-line configuration file takes precedence.
+DEVICE_TRUST_CONFIGURED=0
+if echo "$BOOT_OPTIONS" | tr -s "$IFS" '\n' | grep '^device_trust=' >/dev/null; then
+    DEVICE_TRUST_CONFIGURED=1
+fi
+
+for cmdline in "${KERNEL_INSTALL_STAGING_AREA}"/cmdline*; do
+    [ -f "$cmdline" ] || continue
+    if [ "$DEVICE_TRUST_CONFIGURED" -gt 0 ] && [ "${cmdline##*/}" = cmdline-device-accept ]; then
+        continue
+    fi
+    STAGED_OPTIONS="$(tr -s "$IFS" ' ' <"$cmdline")"
+    STAGED_OPTIONS="${STAGED_OPTIONS# }"
+    STAGED_OPTIONS="${STAGED_OPTIONS% }"
+    [ -n "$STAGED_OPTIONS" ] || continue
+    BOOT_OPTIONS="$BOOT_OPTIONS $STAGED_OPTIONS"
+    BOOT_OPTIONS="${BOOT_OPTIONS# }"
+    BOOT_OPTIONS="${BOOT_OPTIONS% }"
+done
 
 # If the boot entries are named after the machine ID, then suffix the kernel
 # command line with the machine ID we use, so that the machine ID remains
