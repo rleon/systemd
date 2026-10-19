@@ -15,6 +15,8 @@ executables += [
                 'sources' : files('device-accept-d.c'),
                 'export' : files(
                         'accept-config.c',
+                        'accept-bind.c',
+                        'accept-flow.c',
                 ) + accept_config_gperf_c,
                 'install_tag' : 'udev',
         },

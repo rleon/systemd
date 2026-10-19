@@ -6,7 +6,9 @@
 
 #include "sd-device.h"
 
+#include "accept-bind.h"
 #include "accept-config.h"
+#include "accept-flow.h"
 #include "alloc-util.h"
 #include "capability-util.h"
 #include "errno-util.h"
@@ -26,6 +28,7 @@
 
 TEST(tables) {
         test_table(AcceptTrustLevel, accept_trust_level, ACCEPT_TRUST_LEVEL);
+        test_table(AcceptState, accept_state, ACCEPT_STATE);
 }
 
 static void test_selector_valid_one(const char *input, AcceptSelectorType type, const char *value) {
@@ -737,6 +740,303 @@ TEST(apply_all) {
                            FAKE_DEVICES_DIR "/sel-d: adversary (%1$s)\n",
                            filename));
         ASSERT_STREQ(buf, expected);
+
+        _exit(EXIT_SUCCESS);
+}
+
+TEST(config_parse_accept_buses) {
+        _cleanup_strv_free_ char **buses = NULL;
+
+        ASSERT_OK(config_parse_accept_buses(NULL, "test.conf", 1, "DeviceAccept", 1, "HoldProbing", 0,
+                                            "pci usb", &buses, NULL));
+        ASSERT_TRUE(strv_equal(buses, STRV_MAKE("pci", "usb")));
+
+        ASSERT_OK(config_parse_accept_buses(NULL, "test.conf", 2, "DeviceAccept", 1, "HoldProbing", 0,
+                                            "netdevsim pci .. . \"\" foo/bar \"mdio_bus\"", &buses, NULL));
+        ASSERT_TRUE(strv_equal(buses, STRV_MAKE("pci", "usb", "netdevsim", "mdio_bus")));
+
+        ASSERT_OK(config_parse_accept_buses(NULL, "test.conf", 3, "DeviceAccept", 1, "HoldProbing", 0,
+                                            "platform \"unterminated", &buses, NULL));
+        ASSERT_TRUE(strv_equal(buses, STRV_MAKE("pci", "usb", "netdevsim", "mdio_bus", "platform")));
+
+        ASSERT_OK(config_parse_accept_buses(NULL, "test.conf", 4, "DeviceAccept", 1, "HoldProbing", 0,
+                                            "", &buses, NULL));
+        ASSERT_TRUE(strv_isempty(buses));
+}
+
+static void fake_bus_mount(void) {
+        int r;
+
+        r = mount_nofollow_verbose(LOG_ERR, "tmpfs", "/sys/devices", "tmpfs", 0, NULL);
+        if (ERRNO_IS_NEG_PRIVILEGE(r)) {
+                log_tests_skipped("Lacking privileges to mount a tmpfs on /sys/devices");
+                _exit(EXIT_SUCCESS);
+        }
+        ASSERT_OK(r);
+        ASSERT_OK(mount_nofollow_verbose(LOG_ERR, "tmpfs", "/sys/bus", "tmpfs", 0, NULL));
+
+        ASSERT_OK(write_string_file("/sys/bus/test/drivers_autoprobe", "1", WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_MKDIR_0755));
+        ASSERT_OK(touch("/sys/bus/test/drivers_probe"));
+}
+
+static void fake_bus_check(const char *attribute, const char *expected) {
+        _cleanup_free_ char *path = NULL, *value = NULL;
+
+        ASSERT_NOT_NULL(path = path_join("/sys/bus/test", attribute));
+        ASSERT_OK(read_one_line_file(path, &value));
+        ASSERT_STREQ(value, expected);
+
+        /* A write replaces the value of a sysfs attribute, but not of a regular file. */
+        ASSERT_OK_ERRNO(truncate(path, 0));
+}
+
+TEST(bus_autoprobe) {
+        int r;
+
+        if (getuid() != 0 || have_effective_cap(CAP_SYS_ADMIN) <= 0)
+                return (void) log_tests_skipped("Not privileged");
+        if (running_in_chroot() > 0)
+                return (void) log_tests_skipped("Running in chroot");
+
+        r = ASSERT_OK(pidref_safe_fork(
+                        "(bus-autoprobe)",
+                        FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REOPEN_LOG|FORK_LOG|FORK_WAIT|
+                        FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE,
+                        NULL));
+        if (r > 0)
+                return;
+
+        fake_bus_mount();
+        ASSERT_OK_EQ(accept_bus_get_autoprobe("test"), 1);
+        ASSERT_OK_ERRNO(truncate("/sys/bus/test/drivers_autoprobe", 0));
+
+        ASSERT_OK(accept_bus_set_autoprobe("test", /* enable= */ false));
+        ASSERT_OK_ZERO(accept_bus_get_autoprobe("test"));
+        fake_bus_check("drivers_autoprobe", "0");
+        ASSERT_OK(accept_bus_set_autoprobe("test", /* enable= */ true));
+        ASSERT_OK_EQ(accept_bus_get_autoprobe("test"), 1);
+        fake_bus_check("drivers_autoprobe", "1");
+
+        ASSERT_ERROR(accept_bus_get_autoprobe("nonexistent"), ENOENT);
+        ASSERT_ERROR(accept_bus_get_autoprobe(".."), EINVAL);
+        ASSERT_ERROR(accept_bus_set_autoprobe("nonexistent", /* enable= */ false), ENOENT);
+        ASSERT_ERROR(accept_bus_set_autoprobe("..", /* enable= */ false), EINVAL);
+        ASSERT_ERROR(accept_bus_set_autoprobe("test/..", /* enable= */ false), EINVAL);
+
+        _exit(EXIT_SUCCESS);
+}
+
+static int bind_one(const AcceptConfig *config, const char *name) {
+        _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
+        _cleanup_free_ char *syspath = NULL;
+
+        ASSERT_NOT_NULL(syspath = path_join(FAKE_DEVICES_DIR, name));
+        ASSERT_OK(sd_device_new_from_syspath(&dev, syspath));
+
+        return accept_device_bind(config, dev);
+}
+
+TEST(bind) {
+        int r;
+
+        if (getuid() != 0 || have_effective_cap(CAP_SYS_ADMIN) <= 0)
+                return (void) log_tests_skipped("Not privileged");
+        if (running_in_chroot() > 0)
+                return (void) log_tests_skipped("Running in chroot");
+
+        r = ASSERT_OK(pidref_safe_fork(
+                        "(bind)",
+                        FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REOPEN_LOG|FORK_LOG|FORK_WAIT|
+                        FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE,
+                        NULL));
+        if (r > 0)
+                return;
+
+        ASSERT_OK_ERRNO(setenv("SYSTEMD_DEVICE_VERIFY_SYSFS", "0", /* overwrite= */ false));
+        fake_bus_mount();
+
+        AcceptConfig config = {
+                .filename = (char*) "/etc/systemd/accept.d/10-test.conf",
+                .trust_level = ACCEPT_TRUST_LEVEL_FULL,
+        };
+        const char *bus;
+
+        fake_subsystem_device_create("unselected", "full\n", /* on_bus= */ true);
+        ASSERT_OK_EQ(bind_one(/* config= */ NULL, "unselected"), ACCEPT_BIND_NO_DRIVER);
+        fake_bus_check("drivers_probe", "unselected");
+        fake_device_check("unselected", "full", /* written= */ false);
+
+        fake_subsystem_device_create("selected", "none\n", /* on_bus= */ true);
+        ASSERT_OK_EQ(bind_one(&config, "selected"), ACCEPT_BIND_NO_DRIVER);
+        fake_bus_check("drivers_probe", "selected");
+        fake_device_check("selected", "full", /* written= */ true);
+
+        fake_subsystem_device_create("bound", "none\n", /* on_bus= */ true);
+        ASSERT_OK_ERRNO(symlink("../../bus/test/drivers/test-driver", FAKE_DEVICES_DIR "/bound/driver"));
+        ASSERT_OK_EQ(bind_one(&config, "bound"), ACCEPT_BIND_BOUND);
+        fake_bus_check("drivers_probe", "bound");
+
+        config.trust_level = ACCEPT_TRUST_LEVEL_DISABLED;
+        fake_subsystem_device_create("disabled", "full\n", /* on_bus= */ true);
+        ASSERT_OK_EQ(bind_one(&config, "disabled"), ACCEPT_BIND_REFUSED);
+        fake_bus_check("drivers_probe", "");
+        fake_device_check("disabled", "disabled", /* written= */ true);
+
+        config.trust_level = ACCEPT_TRUST_LEVEL_ADVERSARY;
+        fake_subsystem_device_create("no-attribute", /* trust_level= */ NULL, /* on_bus= */ true);
+        ASSERT_ERROR(bind_one(&config, "no-attribute"), ENOENT);
+        fake_bus_check("drivers_probe", "");
+
+        fake_subsystem_device_create("class", "full\n", /* on_bus= */ false);
+        _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
+        ASSERT_OK(sd_device_new_from_syspath(&dev, FAKE_DEVICES_DIR "/class"));
+        ASSERT_ERROR(accept_device_get_bus(dev, &bus), ENOENT);
+        ASSERT_ERROR(bind_one(/* config= */ NULL, "class"), ENOENT);
+        fake_bus_check("drivers_probe", "");
+        dev = sd_device_unref(dev);
+
+        ASSERT_OK(sd_device_new_from_syspath(&dev, FAKE_DEVICES_DIR "/selected"));
+        ASSERT_OK(accept_device_get_bus(dev, &bus));
+        ASSERT_STREQ(bus, "test");
+
+        _exit(EXIT_SUCCESS);
+}
+
+static unsigned n_steps = 0;
+
+static int step_done(AcceptDevice *d) {
+        n_steps++;
+        return 0;
+}
+
+static int step_unavailable(AcceptDevice *d) {
+        n_steps++;
+        return -EOPNOTSUPP;
+}
+
+static int step_fail(AcceptDevice *d) {
+        n_steps++;
+        return -EPERM;
+}
+
+static int step_unexpected(AcceptDevice *d) {
+        assert_not_reached();
+}
+
+static AcceptDevice* flow_device_new(const char *name, const char *trust_level, const AcceptConfig *config) {
+        _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
+        _cleanup_free_ char *syspath = NULL;
+        AcceptDevice *d;
+
+        fake_subsystem_device_create(name, trust_level, /* on_bus= */ true);
+
+        ASSERT_NOT_NULL(syspath = path_join(FAKE_DEVICES_DIR, name));
+        ASSERT_OK(sd_device_new_from_syspath(&dev, syspath));
+        ASSERT_OK(accept_device_new(dev, config, &d));
+        ASSERT_EQ(d->state, ACCEPT_STATE_CONNECT);
+
+        return d;
+}
+
+TEST(flow) {
+        int r;
+
+        if (getuid() != 0 || have_effective_cap(CAP_SYS_ADMIN) <= 0)
+                return (void) log_tests_skipped("Not privileged");
+        if (running_in_chroot() > 0)
+                return (void) log_tests_skipped("Running in chroot");
+
+        r = ASSERT_OK(pidref_safe_fork(
+                        "(flow)",
+                        FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REOPEN_LOG|FORK_LOG|FORK_WAIT|
+                        FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE,
+                        NULL));
+        if (r > 0)
+                return;
+
+        ASSERT_OK_ERRNO(setenv("SYSTEMD_DEVICE_VERIFY_SYSFS", "0", /* overwrite= */ false));
+        fake_bus_mount();
+
+        AcceptConfig config = {
+                .filename = (char*) "/etc/systemd/accept.d/10-test.conf",
+                .trust_level = ACCEPT_TRUST_LEVEL_FULL,
+        };
+        const AcceptStep done[_ACCEPT_STEP_MAX] = {
+                [ACCEPT_STATE_CONNECT] = step_done,
+                [ACCEPT_STATE_MEASURE] = step_done,
+                [ACCEPT_STATE_LOG]     = step_done,
+                [ACCEPT_STATE_EXTEND]  = step_done,
+                [ACCEPT_STATE_VERIFY]  = step_done,
+                [ACCEPT_STATE_RUN]     = step_done,
+        };
+        const AcceptStep fail_verify[_ACCEPT_STEP_MAX] = {
+                [ACCEPT_STATE_CONNECT] = step_done,
+                [ACCEPT_STATE_MEASURE] = step_unavailable,
+                [ACCEPT_STATE_LOG]     = step_done,
+                [ACCEPT_STATE_EXTEND]  = step_done,
+                [ACCEPT_STATE_VERIFY]  = step_fail,
+                [ACCEPT_STATE_RUN]     = step_unexpected,
+        };
+        const AcceptStep unexpected[_ACCEPT_STEP_MAX] = {
+                [ACCEPT_STATE_CONNECT] = step_unexpected,
+                [ACCEPT_STATE_MEASURE] = step_unexpected,
+                [ACCEPT_STATE_LOG]     = step_unexpected,
+                [ACCEPT_STATE_EXTEND]  = step_unexpected,
+                [ACCEPT_STATE_VERIFY]  = step_unexpected,
+                [ACCEPT_STATE_RUN]     = step_unexpected,
+        };
+        _cleanup_(accept_device_freep) AcceptDevice *d = NULL;
+
+        d = flow_device_new("default-steps", "none\n", &config);
+        ASSERT_EQ(accept_device_run(d, accept_steps), ACCEPT_STATE_WAITING);
+        fake_bus_check("drivers_probe", "default-steps");
+        fake_device_check("default-steps", "full", /* written= */ true);
+
+        ASSERT_OK_ERRNO(symlink("../../bus/test/drivers/test-driver", FAKE_DEVICES_DIR "/default-steps/driver"));
+        ASSERT_EQ(accept_device_run(d, accept_steps), ACCEPT_STATE_BOUND);
+        fake_bus_check("drivers_probe", "default-steps");
+
+        ASSERT_EQ(accept_device_run(d, accept_steps), ACCEPT_STATE_BOUND);
+        fake_bus_check("drivers_probe", "");
+        d = accept_device_free(d);
+
+        n_steps = 0;
+        d = flow_device_new("all-steps", "none\n", &config);
+        ASSERT_EQ(accept_device_run(d, done), ACCEPT_STATE_WAITING);
+        ASSERT_EQ(n_steps, (unsigned) _ACCEPT_STEP_MAX);
+        fake_bus_check("drivers_probe", "all-steps");
+        d = accept_device_free(d);
+
+        n_steps = 0;
+        d = flow_device_new("rejected", "full\n", &config);
+        ASSERT_EQ(accept_device_run(d, fail_verify), ACCEPT_STATE_REJECTED);
+        ASSERT_EQ(n_steps, 5u);
+        fake_bus_check("drivers_probe", "");
+        fake_device_check("rejected", "disabled", /* written= */ true);
+
+        ASSERT_EQ(accept_device_run(d, fail_verify), ACCEPT_STATE_REJECTED);
+        ASSERT_EQ(n_steps, 5u);
+        d = accept_device_free(d);
+
+        d = flow_device_new("unselected", "full\n", /* config= */ NULL);
+        ASSERT_EQ(accept_device_run(d, unexpected), ACCEPT_STATE_WAITING);
+        fake_bus_check("drivers_probe", "unselected");
+        fake_device_check("unselected", "full", /* written= */ false);
+        d = accept_device_free(d);
+
+        n_steps = 0;
+        config.trust_level = ACCEPT_TRUST_LEVEL_DISABLED;
+        d = flow_device_new("disabled", "full\n", &config);
+        ASSERT_EQ(accept_device_run(d, done), ACCEPT_STATE_REJECTED);
+        ASSERT_EQ(n_steps, (unsigned) _ACCEPT_STEP_MAX);
+        fake_bus_check("drivers_probe", "");
+        fake_device_check("disabled", "disabled", /* written= */ true);
+        d = accept_device_free(d);
+
+        config.trust_level = ACCEPT_TRUST_LEVEL_FULL;
+        d = flow_device_new("no-attribute", /* trust_level= */ NULL, &config);
+        ASSERT_EQ(accept_device_run(d, done), ACCEPT_STATE_REJECTED);
+        fake_bus_check("drivers_probe", "");
 
         _exit(EXIT_SUCCESS);
 }
