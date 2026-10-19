@@ -5,6 +5,7 @@
 
 #include "sd-device.h"
 
+#include "accept-cmdline.h"
 #include "accept-config.h"
 #include "alloc-util.h"
 #include "conf-files.h"
@@ -475,6 +476,13 @@ int accept_config_apply(const AcceptConfig *config, sd_device *device, bool dry_
                                  ACCEPT_TRUST_POLICY_SYSATTR, token);
                 return 0;
         }
+
+        if (r == -EBUSY && accept_device_is_bound_to_builtin(device) > 0)
+                return log_device_warning_errno(device, r,
+                                                "Cannot apply trust level '%s' from %s, the device is bound to a "
+                                                "built-in driver already, and its trust level has to be passed on "
+                                                "the kernel command line (see --kernel-cmdline), ignoring.",
+                                                token, config->filename);
 
         if (r == -EBUSY)
                 return log_device_warning_errno(device, r,

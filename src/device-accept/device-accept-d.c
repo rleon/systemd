@@ -2,12 +2,14 @@
 
 #include <signal.h>
 #include <stdio.h>
+#include <sys/utsname.h>
 
 #include "sd-device.h"
 #include "sd-event.h"
 #include "sd-json.h"
 
 #include "accept-bind.h"
+#include "accept-cmdline.h"
 #include "accept-config.h"
 #include "accept-flow.h"
 #include "alloc-util.h"
@@ -38,6 +40,10 @@
 #endif
 
 static bool arg_dry_run = false;
+static bool arg_kernel_cmdline = false;
+static char *arg_kernel_version = NULL;
+
+STATIC_DESTRUCTOR_REGISTER(arg_kernel_version, freep);
 
 COMMAND(
         "systemd-device-accept-d\0",
@@ -747,7 +753,55 @@ static int dry_run(void) {
         return 0;
 }
 
+static int print_kernel_cmdline(void) {
+        _cleanup_(accept_kernel_modules_freep) AcceptKernelModules *modules = NULL;
+        _cleanup_(accept_config_ctx_freep) AcceptConfigContext *ctx = NULL;
+        _cleanup_free_ char *dir = NULL, *option = NULL;
+        int r;
+
+        r = config_load(&ctx);
+        if (r < 0)
+                return r;
+
+        if (accept_config_is_empty(ctx))
+                return 0;
+
+        if (arg_kernel_version)
+                dir = path_join("/usr/lib/modules", arg_kernel_version);
+        else {
+                struct utsname u;
+
+                assert_se(uname(&u) >= 0);
+                dir = path_join("/usr/lib/modules", u.release);
+        }
+        if (!dir)
+                return log_oom();
+
+        r = accept_kernel_modules_load(dir, &modules);
+        if (r == -ENOENT)
+                log_notice("The modules of the kernel are not listed in %s/, assuming that a built-in driver might "
+                           "be bound to any device.", dir);
+        else if (r < 0)
+                return log_error_errno(r, "Failed to read the modules of the kernel from %s/: %m", dir);
+
+        r = accept_kernel_cmdline(ctx, modules, &option);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enumerate devices: %m");
+
+        if (!option)
+                return 0;
+
+        if (strlen(option) > 1024)
+                log_warning("The kernel command line option for the trust levels is %zu bytes long, and might not fit "
+                            "on the kernel command line. Select fewer devices.", strlen(option));
+
+        puts(option);
+        return 0;
+}
+
 static int parse_argv(int argc, char *argv[]) {
+        int r;
+
         assert(argc >= 0);
         assert(argv);
 
@@ -766,6 +820,20 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_dry_run = true;
                         break;
 
+                OPTION_LONG_FLAGS(OPTION_OPTIONAL_ARG, "kernel-cmdline", "VERSION",
+                                  "Print the kernel command line option for the devices that built-in "
+                                  "drivers might be bound to, and exit"):
+                        if (opts.arg && !filename_is_valid(opts.arg))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Invalid kernel version: %s", opts.arg);
+
+                        r = free_and_strdup_warn(&arg_kernel_version, opts.arg);
+                        if (r < 0)
+                                return r;
+
+                        arg_kernel_cmdline = true;
+                        break;
+
                 OPTION_COMMON_INTROSPECT_CLI:
                         return introspect_cli(SD_JSON_FORMAT_OFF);
                 }
@@ -773,6 +841,10 @@ static int parse_argv(int argc, char *argv[]) {
         if (option_parser_get_n_args(&opts) > 0)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "This program takes no arguments.");
+
+        if (arg_dry_run && arg_kernel_cmdline)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--dry-run and --kernel-cmdline cannot be combined.");
 
         return 1;
 }
@@ -790,6 +862,8 @@ static int run(int argc, char *argv[]) {
 
         if (arg_dry_run)
                 return dry_run();
+        if (arg_kernel_cmdline)
+                return print_kernel_cmdline();
 
         r = manager_new(&m);
         if (r < 0)

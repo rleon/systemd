@@ -7,6 +7,7 @@
 #include "sd-device.h"
 
 #include "accept-bind.h"
+#include "accept-cmdline.h"
 #include "accept-config.h"
 #include "accept-flow.h"
 #include "alloc-util.h"
@@ -1037,6 +1038,180 @@ TEST(flow) {
         d = flow_device_new("no-attribute", /* trust_level= */ NULL, &config);
         ASSERT_EQ(accept_device_run(d, done), ACCEPT_STATE_REJECTED);
         fake_bus_check("drivers_probe", "");
+
+        _exit(EXIT_SUCCESS);
+}
+
+static void fake_modules_dir_create(const char *dir) {
+        static const char modinfo[] =
+                "test_builtin.alias=test:builtin-*\0"
+                "test_builtin.license=GPL\0"
+                "\0"
+                "invalid\0"
+                "other.alias=\0"
+                "other.description=No alias\0";
+        _cleanup_free_ char *path = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
+
+        write_file(dir, "modules.dep",
+                   "kernel/drivers/test/loadable.ko.xz:\n"
+                   "kernel/drivers/test/other-module.ko: kernel/drivers/test/loadable.ko.xz\n");
+
+        ASSERT_NOT_NULL(path = path_join(dir, "modules.builtin.modinfo"));
+        ASSERT_NOT_NULL(f = fopen(path, "we"));
+        ASSERT_EQ(fwrite(modinfo, 1, sizeof(modinfo) - 1, f), sizeof(modinfo) - 1);
+        ASSERT_OK(fflush_and_check(f));
+}
+
+TEST(kernel_modules_load) {
+        _cleanup_(rm_rf_physical_and_freep) char *root = NULL;
+        _cleanup_(accept_kernel_modules_freep) AcceptKernelModules *modules = NULL;
+
+        ASSERT_OK(mkdtemp_malloc("/tmp/test-accept-config-XXXXXX", &root));
+
+        ASSERT_ERROR(accept_kernel_modules_load(root, &modules), ENOENT);
+        write_file(root, "modules.dep", "kernel/drivers/test/loadable.ko.xz:\n");
+        ASSERT_ERROR(accept_kernel_modules_load(root, &modules), ENOENT);
+
+        fake_modules_dir_create(root);
+        ASSERT_OK(accept_kernel_modules_load(root, &modules));
+        ASSERT_NOT_NULL(modules);
+}
+
+static void fake_driver_bind(const char *name, const char *driver, const char *module, bool loadable) {
+        _cleanup_free_ char *driver_dir = NULL, *link = NULL;
+
+        ASSERT_NOT_NULL(driver_dir = path_join("/sys/bus/test/drivers", driver));
+        ASSERT_OK(mkdir_p(driver_dir, 0755));
+
+        ASSERT_NOT_NULL(link = path_join(FAKE_DEVICES_DIR, name, "driver"));
+        ASSERT_OK_ERRNO(symlink(driver_dir, link));
+
+        if (!module)
+                return;
+
+        _cleanup_free_ char *module_dir = NULL, *module_link = NULL;
+        ASSERT_NOT_NULL(module_dir = path_join("/sys/module", module));
+        ASSERT_OK(mkdir_p(module_dir, 0755));
+        if (loadable)
+                write_file(module_dir, "initstate", "live");
+
+        ASSERT_NOT_NULL(module_link = path_join(driver_dir, "module"));
+        (void) symlink(module_dir, module_link);
+}
+
+static int is_bound_to_builtin(const char *name) {
+        _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
+        _cleanup_free_ char *syspath = NULL;
+
+        ASSERT_NOT_NULL(syspath = path_join(FAKE_DEVICES_DIR, name));
+        ASSERT_OK(sd_device_new_from_syspath(&dev, syspath));
+
+        return accept_device_is_bound_to_builtin(dev);
+}
+
+TEST(kernel_cmdline) {
+        _cleanup_(rm_rf_physical_and_freep) char *root = NULL;
+        _cleanup_(accept_config_ctx_freep) AcceptConfigContext *ctx = NULL, *empty = NULL;
+        _cleanup_(accept_kernel_modules_freep) AcceptKernelModules *modules = NULL;
+        _cleanup_strv_free_ char **dirs = NULL, **empty_dirs = NULL;
+        int r;
+
+        if (getuid() != 0 || have_effective_cap(CAP_SYS_ADMIN) <= 0)
+                return (void) log_tests_skipped("Not privileged");
+        if (running_in_chroot() > 0)
+                return (void) log_tests_skipped("Running in chroot");
+
+        ASSERT_OK(mkdtemp_malloc("/tmp/test-accept-config-XXXXXX", &root));
+
+        const char *etc = strjoina(root, "/etc"), *modules_dir = strjoina(root, "/modules");
+        ASSERT_NOT_NULL(dirs = strv_new(etc));
+        ASSERT_NOT_NULL(empty_dirs = strv_new(strjoina(root, "/empty")));
+
+        write_file(etc, "10-default.conf",
+                   "[Match]\n"
+                   "Device=name:dev-default\n"
+                   "\n"
+                   "[Accept]\n"
+                   "TrustLevel=default\n");
+        write_file(etc, "20-test.conf",
+                   "[Match]\n"
+                   "Device=name:dev*\n"
+                   "\n"
+                   "[Accept]\n"
+                   "TrustLevel=adversary\n");
+
+        ASSERT_OK(accept_config_ctx_new(dirs, &ctx));
+        ASSERT_OK(accept_config_load(ctx));
+        ASSERT_OK(accept_config_ctx_new(empty_dirs, &empty));
+        ASSERT_OK(accept_config_load(empty));
+
+        fake_modules_dir_create(modules_dir);
+        ASSERT_OK(accept_kernel_modules_load(modules_dir, &modules));
+
+        r = ASSERT_OK(pidref_safe_fork(
+                        "(kernel-cmdline)",
+                        FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REOPEN_LOG|FORK_LOG|FORK_WAIT|
+                        FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE,
+                        NULL));
+        if (r > 0)
+                return;
+
+        ASSERT_OK_ERRNO(setenv("SYSTEMD_DEVICE_VERIFY_SYSFS", "0", /* overwrite= */ false));
+        fake_bus_mount();
+        ASSERT_OK(mount_nofollow_verbose(LOG_ERR, "tmpfs", "/sys/module", "tmpfs", 0, NULL));
+
+        fake_subsystem_device_create("dev-builtin", "default\n", /* on_bus= */ true);
+        fake_driver_bind("dev-builtin", "drv-builtin", "test_builtin", /* loadable= */ false);
+        fake_subsystem_device_create("dev-no-module", "default\n", /* on_bus= */ true);
+        fake_driver_bind("dev-no-module", "drv-no-module", /* module= */ NULL, /* loadable= */ false);
+        fake_subsystem_device_create("dev-loadable", "default\n", /* on_bus= */ true);
+        fake_driver_bind("dev-loadable", "drv-loadable", "loadable", /* loadable= */ true);
+        fake_subsystem_device_create("dev-loadable-alias", "default\n", /* on_bus= */ true);
+        fake_driver_bind("dev-loadable-alias", "drv-loadable", "loadable", /* loadable= */ true);
+        write_file(FAKE_DEVICES_DIR "/dev-loadable-alias", "uevent", "MODALIAS=test:builtin-2");
+
+        fake_subsystem_device_create("dev-alias", "default\n", /* on_bus= */ true);
+        write_file(FAKE_DEVICES_DIR "/dev-alias", "uevent", "MODALIAS=test:builtin-1");
+        fake_subsystem_device_create("dev-other-alias", "default\n", /* on_bus= */ true);
+        write_file(FAKE_DEVICES_DIR "/dev-other-alias", "uevent", "MODALIAS=test:module-1");
+        fake_subsystem_device_create("dev-no-alias", "default\n", /* on_bus= */ true);
+        fake_subsystem_device_create("dev-listed", "default\n", /* on_bus= */ true);
+        ASSERT_OK_ERRNO(setenv("SYSTEMD_PROC_CMDLINE",
+                               "quiet device_trust=test:dev-other=full,test:dev-listed=disabled,bogus",
+                               /* overwrite= */ true));
+
+        fake_subsystem_device_create("dev-default", "default\n", /* on_bus= */ true);
+        fake_driver_bind("dev-default", "drv-builtin", "test_builtin", /* loadable= */ false);
+        fake_subsystem_device_create("dev-class", "default\n", /* on_bus= */ false);
+        fake_subsystem_device_create("dev,comma", "default\n", /* on_bus= */ true);
+        fake_driver_bind("dev,comma", "drv-builtin", "test_builtin", /* loadable= */ false);
+        fake_subsystem_device_create("unselected", "default\n", /* on_bus= */ true);
+        fake_driver_bind("unselected", "drv-builtin", "test_builtin", /* loadable= */ false);
+
+        ASSERT_OK_POSITIVE(is_bound_to_builtin("dev-builtin"));
+        ASSERT_OK_POSITIVE(is_bound_to_builtin("dev-no-module"));
+        ASSERT_OK_ZERO(is_bound_to_builtin("dev-loadable"));
+        ASSERT_OK_ZERO(is_bound_to_builtin("dev-alias"));
+
+        _cleanup_free_ char *option = NULL;
+        ASSERT_OK_POSITIVE(accept_kernel_cmdline(ctx, modules, &option));
+        ASSERT_STREQ(option,
+                     "device_trust=test:dev-alias=adversary,test:dev-builtin=adversary,"
+                     "test:dev-default=default,test:dev-listed=adversary,test:dev-loadable-alias=adversary,"
+                     "test:dev-no-module=adversary");
+        option = mfree(option);
+
+        ASSERT_OK_POSITIVE(accept_kernel_cmdline(ctx, /* modules= */ NULL, &option));
+        ASSERT_STREQ(option,
+                     "device_trust=test:dev-alias=adversary,test:dev-builtin=adversary,"
+                     "test:dev-default=default,test:dev-listed=adversary,test:dev-loadable=adversary,"
+                     "test:dev-loadable-alias=adversary,test:dev-no-alias=adversary,"
+                     "test:dev-no-module=adversary,test:dev-other-alias=adversary");
+        option = mfree(option);
+
+        ASSERT_OK_ZERO(accept_kernel_cmdline(empty, /* modules= */ NULL, &option));
+        ASSERT_NULL(option);
 
         _exit(EXIT_SUCCESS);
 }

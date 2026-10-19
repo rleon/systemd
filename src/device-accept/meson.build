@@ -16,6 +16,7 @@ executables += [
                 'export' : files(
                         'accept-config.c',
                         'accept-bind.c',
+                        'accept-cmdline.c',
                         'accept-flow.c',
                 ) + accept_config_gperf_c,
                 'install_tag' : 'udev',
@@ -43,6 +44,15 @@ executables += [
 ]
 
 install_emptydir(libexecdir / 'accept.d', install_tag : 'udev')
+
+custom_target(
+        input : '55-device-accept.install.in',
+        output : '55-device-accept.install',
+        command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
+        install : conf.get('ENABLE_KERNEL_INSTALL') == 1,
+        install_mode : 'rwxr-xr-x',
+        install_dir : kernelinstalldir,
+        install_tag : 'udev')
 
 if install_sysconfdir_samples
         install_data('device-accept.conf',

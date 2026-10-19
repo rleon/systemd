@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+set -e
+
+COMMAND="${1:?}"
+KERNEL_VERSION="${2:?}"
+
+[ "$COMMAND" = "add" ] || exit 0
+[ -x "{{LIBEXECDIR}}/systemd-device-accept-d" ] || exit 0
+
+# Image builds do not see the devices of the machine the kernel is for.
+if systemd-detect-virt --container --quiet || systemd-detect-virt --chroot --quiet; then
+    [ "$KERNEL_INSTALL_VERBOSE" -gt 0 ] && \
+        echo "Running in a container or chroot, not adding device trust levels to the kernel command line."
+    exit 0
+fi
+
+OPTIONS="$("{{LIBEXECDIR}}/systemd-device-accept-d" --kernel-cmdline="$KERNEL_VERSION")"
+
+# Even empty successful output tells consumers to discard inherited device_trust= options.
+[ "$KERNEL_INSTALL_VERBOSE" -gt 0 ] && echo "Regenerating device trust options: $OPTIONS"
+echo "$OPTIONS" >"$KERNEL_INSTALL_STAGING_AREA/cmdline-device-accept"
